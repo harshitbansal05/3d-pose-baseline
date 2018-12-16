@@ -138,6 +138,60 @@ def create_model( session, actions, batch_size ):
 
   return model
 
+
+def eval():
+  actions = data_utils.define_actions( FLAGS.action )
+
+  number_of_actions = len( actions )
+
+  # Load camera parameters
+  SUBJECT_IDS = [1,5,6,7,8,9,11]
+  rcams = cameras.load_cameras(FLAGS.cameras_path, SUBJECT_IDS)
+
+  # Load 3d data and load (or create) 2d projections
+  train_set_3d, test_set_3d, data_mean_3d, data_std_3d, dim_to_ignore_3d, dim_to_use_3d, train_root_positions, test_root_positions = data_utils.read_3d_data(
+    actions, FLAGS.data_dir, FLAGS.camera_frame, rcams, FLAGS.predict_14 )
+
+  # Read stacked hourglass 2D predictions if use_sh, otherwise use groundtruth 2D projections
+  if FLAGS.use_sh:
+    train_set_2d, test_set_2d, data_mean_2d, data_std_2d, dim_to_ignore_2d, dim_to_use_2d = data_utils.read_2d_predictions(actions, FLAGS.data_dir)
+  
+  with tf.Session(config=tf.ConfigProto(
+    device_count=device_count,
+    allow_soft_placement=True )) as sess:
+
+    # === Create the model ===
+    print("Creating %d bi-layers of %d units." % (FLAGS.num_layers, FLAGS.linear_size))
+    model = create_model( sess, actions, FLAGS.batch_size )
+    model.train_writer.add_graph( sess.graph )
+    print("Model created")
+
+    step_time, loss, val_loss = 0.0, 0.0, 0.0
+    n_joints = 17 if not(FLAGS.predict_14) else 14
+    encoder_inputs, decoder_outputs = model.get_all_batches(test_set_2d, test_set_3d, FLAGS.camera_frame, training=False)
+
+    print('Encoder Length: ', len(encoder_inputs))
+    total_err, joint_err, step_time, loss = evaluate_batches( sess, model,
+        data_mean_3d, data_std_3d, dim_to_use_3d, dim_to_ignore_3d,
+        data_mean_2d, data_std_2d, dim_to_use_2d, dim_to_ignore_2d,
+        1, encoder_inputs, decoder_outputs, 1 )
+
+    print("=============================\n"
+          "Step-time (ms):      %.4f\n"
+          "Val loss avg:        %.4f\n"
+          "Val error avg (mm):  %.2f\n"
+          "=============================" % ( 1000*step_time, loss, total_err ))
+
+    for i in range(n_joints):
+      # 6 spaces, right-aligned, 5 decimal places
+      print("Error in joint {0:02d} (mm): {1:>5.2f}".format(i+1, joint_err[i]))
+    print("=============================")
+
+    # Log the error to tensorboard
+    summaries = sess.run( model.err_mm_summary, {model.err_mm: total_err} )
+    model.test_writer.add_summary( summaries, current_step )
+
+
 def train():
   """Train a linear model for 3d pose estimation"""
 
